@@ -1,0 +1,210 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>SecureChat Client</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.5/signalr.min.js"></script>
+  
+</head>
+<body>
+    <h2>Secure Chat Project</h2>
+    <div id="status">Not yet encrypted</div>
+    <div id="chatInfo">
+        Users Connected: <span id="userCount">1</span><br>
+
+    </div>
+    <div>
+        <input type="text" id="messageInput" placeholder="Enter message" />
+        <button id="sendBtn" onclick="sendMessage()" disabled>Send</button>
+    </div>
+    <div id="chatBox"></div>
+
+    <script>
+        let rsaKeyPair = null;
+        var otherClientPublicKey = null;
+        let aesKey = null;
+        let hmacKey = null;
+        let isAesReady = false;
+        let hasSentAESKey = false;
+        let sessionId = crypto.randomUUID();
+        const recievedMessageIds = new Set();
+
+        const connection = new signalR.HubConnectionBuilder()
+            .withUrl("https://localhost:7174/chathub")
+            .build();
+
+        connection.start().then(async () => {
+            await generateKeyPair();
+            const publicKeyBase64 = await exportPublicKey();
+            connection.invoke("ExchangePublicKey", sessionId, publicKeyBase64);
+        });
+
+        
+
+        async function generateKeyPair() {
+            rsaKeyPair = await window.crypto.subtle.generateKey(
+                {
+                    name: "RSA-OAEP",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        async function exportPublicKey() {
+            const spki = await window.crypto.subtle.exportKey("spki", rsaKeyPair.publicKey);
+
+            const hash = await crypto.subtle.digest("SHA-256", spki);
+            const arr = Array.from(new Uint8Array(hash));
+
+            return btoa(String.fromCharCode(...new Uint8Array(spki)));
+        }
+
+        async function importOtherClientPublicKey(base64Key) {
+            const binaryDer = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
+
+
+            return await window.crypto.subtle.importKey(
+                "spki",
+                binaryDer,
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                true,
+                ["encrypt"]
+            );
+        }
+
+        async function MakeAndSendAESKey() {
+            aesKey = await window.crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt", "decrypt"]
+            );
+            const rawKey = await window.crypto.subtle.exportKey("raw", aesKey);
+
+            hmacKey = await window.crypto.subtle.importKey(
+                "raw",
+                rawKey,
+                { name: "HMAC", hash: "SHA-256" },
+                true,
+                ["sign", "verify"]
+            );
+
+            isAesReady = true;
+            document.getElementById("status").innerText = "Encrypted";
+            document.getElementById("status").style.color = "green";
+            document.getElementById("sendBtn").disabled = false;
+
+            const encryptedKey = await window.crypto.subtle.encrypt(
+                { name: "RSA-OAEP" },
+                otherClientPublicKey,
+                rawKey
+            );
+            const encryptedKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(encryptedKey)));
+            await connection.invoke("SendAESKey", sessionId, encryptedKeyBase64);
+        }
+
+        connection.on("RecievePublicKey", async (user, publicKey) => {
+            if (user === sessionId) return;
+
+            otherClientPublicKey = await importOtherClientPublicKey(publicKey);
+            if (otherClientPublicKey && !hasSentAESKey) {
+                await MakeAndSendAESKey();
+                hasSentAESKey = true;
+
+            }
+        });
+
+        connection.on("RecieveAESKey", async (user, encryptedKeyBase64) => {
+            try {
+                const encryptedBytes = Uint8Array.from(atob(encryptedKeyBase64), c => c.charCodeAt(0));
+                const rawKey = await window.crypto.subtle.decrypt(
+                    { name: "RSA-OAEP" },
+                    rsaKeyPair.privateKey,
+                    encryptedBytes
+                );
+                aesKey = await window.crypto.subtle.importKey("raw", rawKey, "AES-GCM", true, ["encrypt", "decrypt"]);
+
+                const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
+                hmacKey = await window.crypto.subtle.importKey(
+                    "raw",
+                    rawAesKey,
+                    { name: "HMAC", hash: "SHA-256" },
+                    true,
+                    ["sign", "verify"]
+                );
+
+                isAesReady = true;
+                document.getElementById("status").innerText = "Encrypted";
+                document.getElementById("status").style.color = "green";
+                document.getElementById("sendBtn").disabled = false;
+   
+            } catch (err) {
+                console.log("skippede AES key");
+            }
+        });
+
+        async function sendMessage() {
+
+            if (!isAesReady || !hmacKey) {
+                alert("Encryption not ready yet.");
+                return;
+            }
+
+            const messageInput = document.getElementById("messageInput");
+            const message = messageInput.value;
+            const encoder = new TextEncoder();
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const ciphertext = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv },
+                aesKey,
+                encoder.encode(message)
+            );
+            const ivBase64 = btoa(String.fromCharCode(...iv));
+            const encryptedBase64 = btoa(String.fromCharCode(...new Uint8Array(ciphertext)));
+            const dataToSign = encoder.encode(`${ivBase64}.${encryptedBase64}`);
+            const signature = await window.crypto.subtle.sign("HMAC", hmacKey, dataToSign);
+            const hmac = btoa(String.fromCharCode(...new Uint8Array(signature)));
+            const messageId = crypto.randomUUID();
+
+            connection.invoke("SendMessage", `${ivBase64}.${encryptedBase64}`, hmac, messageId)
+                .catch(err => console.error(err.toString()));
+
+            messageInput.value = "";
+        }
+
+        connection.on("RecieveMessage", async (encryptedMessage, hmac, messageId) => {
+            if (recievedMessageIds.has(messageId)) return;
+            recievedMessageIds.add(messageId);
+
+            const chatBox = document.getElementById("chatBox");
+            const [ivBase64, encryptedBase64] = encryptedMessage.split(".");
+            const iv = Uint8Array.from(atob(ivBase64), c => c.charCodeAt(0));
+            const cipertext = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+
+            const messageToVerify = new TextEncoder().encode(`${ivBase64}.${encryptedBase64}`);
+            const hmacBytes = Uint8Array.from(atob(hmac), c => c.charCodeAt(0));
+
+            const isValid = await window.crypto.subtle.verify("HMAC", hmacKey, hmacBytes, messageToVerify);
+            if (!isValid) {
+                chatBox.innerHTML += `<div style="color: red;"><strong>Integrity failed.</strong></div>`;
+                return;
+            }
+
+            try {
+                const decrypted = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, cipertext);
+                const plaintext = new TextDecoder().decode(decrypted);
+                chatBox.innerHTML += `<div class="message"> ${plaintext}</div>`;
+            } catch (e) {
+                chatBox.innerHTML += `<div style="color: red;"><strong>Decryption failed</strong></div>`;
+            }
+        });
+
+        connection.on("UserCountUpdate", (count) => {
+            document.getElementById("userCount").innerText = count;
+        });
+    </script>
+</body>
+</html>
