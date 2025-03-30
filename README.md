@@ -101,7 +101,7 @@ Pictures
 
 Here you can see where the messages are shown when they have been send
 
-![Picture 2](images/ClientWithMessages.jpg)
+![Picture 2](images/Client1WithMessages.jpg)
 
 
 
