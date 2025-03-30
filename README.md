@@ -53,12 +53,17 @@ Integrity:
 	The HMAC key is derived from the AES key so it is connected to each other. This means that every message has a base64 HMAC over the IV.CipherText ensuring that both the IV and ciphertext has not been touched by anyone. 
 
 Examples from the code:
-   • Import AES key as HMAC key: crypto.subtle.importKey("raw", rawKey, { name: "HMAC", hash: "SHA-256" })
-   • Sign encrypted message: crypto.subtle.sign("HMAC", hmacKey, dataToSign)
-   • Verify message integrity: crypto.subtle.verify("HMAC", hmacKey, signature, dataToVerify)
+
+
+   Import AES key as HMAC key: crypto.subtle.importKey("raw", rawKey, { name: "HMAC", hash: "SHA-256" })
+   
+   Sign encrypted message: crypto.subtle.sign("HMAC", hmacKey, dataToSign)
+   
+   Verify message integrity: crypto.subtle.verify("HMAC", hmacKey, signature, dataToVerify)
 
 Backend:
-   • The backend in this project consists of a Signal R-hub which only job is to send data back and forth ensuring that the server is not able to read the clients messages. 
+
+   The backend in this project consists of a Signal R-hub which only job is to send data back and forth ensuring that the server is not able to read the clients messages. 
 
 Keys:
 
